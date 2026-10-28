@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Filtro ND 180°</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 480px; margin: 0 auto; padding: 16px; background: #111; color: #eee; }
+  h1 { font-size: 1.3rem; }
+  label { display: block; margin-top: 14px; font-size: .9rem; color: #aaa; }
+  select, input { width: 100%; font-size: 1.1rem; padding: 10px; margin-top: 4px; border-radius: 8px; border: 1px solid #444; background: #222; color: #fff; box-sizing: border-box; }
+  .box { margin-top: 20px; padding: 16px; background: #1e1e1e; border-radius: 12px; }
+  .big { font-size: 1.8rem; font-weight: bold; color: #4fc3f7; }
+  small { color: #888; }
+</style>
+</head>
+<body>
+<h1>Filtro ND per regola dei 180°</h1>
+
+<label for="fps">Frame rate (fps)</label>
+<select id="fps">
+  <option>24</option><option>25</option><option>30</option>
+  <option>48</option><option>50</option><option selected>60</option>
+  <option>100</option><option>120</option>
+</select>
+
+<label for="foto">Stima dalla luce: scatta una foto con l'iPhone e caricala</label>
+<input id="foto" type="file" accept="image/jpeg">
+<small id="infoFoto">Opzionale. Scatta con l'app Fotocamera e scegli la foto dalla Libreria (lo scatto diretto da qui non contiene i dati).</small>
+
+<label for="shutter">Otturatore scelto dal drone senza filtro (1/x)</label>
+<input id="shutter" type="number" inputmode="numeric" value="1000" min="1">
+<small>Metti il drone in automatico, ISO al minimo, e leggi il tempo (es. 1/1000 → scrivi 1000).</small>
+
+<div class="box" id="out"></div>
+
+<script>
+const NDS = [
+  { nome: "ND4",    stop: 2 },
+  { nome: "ND8",    stop: 3 },
+  { nome: "ND16",   stop: 4 },
+  { nome: "ND32",   stop: 5 },
+  { nome: "ND64",   stop: 6 },
+  { nome: "ND128",  stop: 7 },
+  { nome: "ND256",  stop: 8 }
+];
+
+function calcola() {
+  const fps = parseFloat(document.getElementById("fps").value);
+  const x = parseFloat(document.getElementById("shutter").value);
+  const out = document.getElementById("out");
+  if (!x || x <= 0) { out.textContent = "Inserisci un valore valido."; return; }
+
+  const target = 2 * fps;               // denominatore otturatore a 180°
+  const stopNecessari = Math.log2(x / target);
+
+  let html = `<div>Otturatore target (180°)</div><div class="big">1/${target}</div>`;
+
+  if (stopNecessari < 0.3) {
+    html += `<p>Non serve nessun filtro: la luce è già bassa o l'otturatore automatico è più lento del target.</p>`;
+    out.innerHTML = html; return;
+  }
+
+  html += `<p>Stop da togliere: <b>${stopNecessari.toFixed(1)}</b></p>`;
+
+  let migliore = NDS[0];
+  for (const nd of NDS) {
+    if (Math.abs(nd.stop - stopNecessari) < Math.abs(migliore.stop - stopNecessari)) migliore = nd;
+  }
+  const diff = migliore.stop - stopNecessari;
+  html += `<div>Filtro consigliato</div><div class="big">${migliore.nome}</div>`;
+  if (Math.abs(diff) < 0.3) {
+    html += `<p>Esposizione praticamente corretta.</p>`;
+  } else if (diff > 0) {
+    html += `<p>Immagine circa ${diff.toFixed(1)} stop più scura: puoi alzare un po' l'ISO.</p>`;
+  } else {
+    html += `<p>Immagine circa ${(-diff).toFixed(1)} stop più chiara: potresti avere sovraesposizione.</p>`;
+  }
+  out.innerHTML = html;
+}
+
+// ---- Stima da foto (EXIF) ----
+// Dati DJI Lito X1 (da schede tecniche): diaframma fisso f/1.7, ISO video minimo 100
+const DRONE_F = 1.7;
+const DRONE_ISO = 100;
+
+function leggiIFD(v, start, off, little) {
+  const tags = {};
+  const n = v.getUint16(start + off, little);
+  for (let i = 0; i < n; i++) {
+    const e = start + off + 2 + i * 12;
+    const tag = v.getUint16(e, little);
+    const type = v.getUint16(e + 2, little);
+    if (type === 3) tags[tag] = v.getUint16(e + 8, little);
+    else if (type === 4) tags[tag] = v.getUint32(e + 8, little);
+    else if (type === 5) {
+      const p = start + v.getUint32(e + 8, little);
+      tags[tag] = v.getUint32(p, little) / v.getUint32(p + 4, little);
+    }
+  }
+  return tags;
+}
+
+function leggiExif(buf) {
+  const v = new DataView(buf);
+  const b = new Uint8Array(buf);
+  const limite = Math.min(b.length - 12, 400000);
+  // cerca "Exif\0\0" seguito dall'intestazione TIFF (vale per JPEG e HEIC)
+  for (let i = 0; i < limite; i++) {
+    if (b[i] === 0x45 && b[i+1] === 0x78 && b[i+2] === 0x69 && b[i+3] === 0x66 && b[i+4] === 0 && b[i+5] === 0) {
+      const start = i + 6;
+      const ii = b[start] === 0x49 && b[start+1] === 0x49;
+      const mm = b[start] === 0x4D && b[start+1] === 0x4D;
+      if (!ii && !mm) continue;
+      try {
+        const ifd0 = leggiIFD(v, start, v.getUint32(start + 4, ii), ii);
+        if (!ifd0[0x8769]) continue;
+        const ex = leggiIFD(v, start, ifd0[0x8769], ii);
+        if (ex[0x829A] && ex[0x829D]) {
+          return { t: ex[0x829A], f: ex[0x829D], iso: ex[0x8827] || ex[0x8833] };
+        }
+      } catch (e) { /* prova la prossima occorrenza */ }
+    }
+  }
+  return null;
+}
+
+document.getElementById("foto").addEventListener("change", async (ev) => {
+  const info = document.getElementById("infoFoto");
+  const file = ev.target.files[0];
+  if (!file) return;
+  try {
+    const d = leggiExif(await file.arrayBuffer());
+    if (!d || !d.t || !d.f || !d.iso) {
+      info.textContent = "Dati EXIF non trovati (la foto potrebbe essere stata convertita). Inserisci il valore a mano.";
+      return;
+    }
+    const ev100 = Math.log2(d.f * d.f / d.t) - Math.log2(d.iso / 100);
+    const x = Math.round(Math.pow(2, ev100) * (DRONE_ISO / 100) / (DRONE_F * DRONE_F));
+    document.getElementById("shutter").value = x;
+    info.textContent = `Foto: f/${d.f.toFixed(2)}, 1/${Math.round(1 / d.t)}s, ISO ${d.iso}. Il drone (f/${DRONE_F}, ISO ${DRONE_ISO}) sceglierebbe circa 1/${x}.`;
+    calcola();
+  } catch (e) {
+    info.textContent = "Non riesco a leggere questa foto. Inserisci il valore a mano.";
+  }
+});
+
+document.getElementById("fps").addEventListener("change", calcola);
+document.getElementById("shutter").addEventListener("input", calcola);
+calcola();
+</script>
+</body>
+</html>
